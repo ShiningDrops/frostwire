@@ -39,7 +39,7 @@ import static com.frostwire.jlibtorrent.alerts.AlertType.*;
  * @author gubatron
  * @author aldenml
  */
-public final class BTEngine {
+public final class BTEngine extends SessionManager {
 
     private static final Logger LOGGER = Logger.getLogger(BTEngine.class);
 
@@ -62,24 +62,12 @@ public final class BTEngine {
     private final InnerListener innerListener;
     private final Queue<RestoreDownloadTask> restoreDownloadsQueue;
 
-    private Session session;
-    private Downloader downloader;
     private BTEngineListener listener;
-    private int totalDHTNodes;
-
-    private boolean firewalled;
-    private List<TcpEndpoint> listenEndpoints;
-    private Address externalAddress;
-
-    private static final LruCache<String, byte[]> MAGNET_CACHE = new LruCache<String, byte[]>(50);
-    private static final Object MAGNET_LOCK = new Object();
 
     private BTEngine() {
         this.sync = new ReentrantLock();
         this.innerListener = new InnerListener();
         this.restoreDownloadsQueue = new LinkedList<>();
-
-        this.listenEndpoints = new LinkedList<>();
     }
 
     private static class Loader {
@@ -94,7 +82,7 @@ public final class BTEngine {
     }
 
     public Session getSession() {
-        return session;
+        return isRunning() ? new Session(swig()) : null;
     }
 
     public BTEngineListener getListener() {
@@ -105,74 +93,54 @@ public final class BTEngine {
         this.listener = listener;
     }
 
-    public boolean isFirewalled() {
-        return firewalled;
-    }
-
     public long getDownloadRate() {
-        if (session == null) {
-            return 0;
-        }
-        return session.getStats().downloadRate();
+        return super.downloadRate();
     }
 
     public long getUploadRate() {
-        if (session == null) {
-            return 0;
-        }
-        return session.getStats().uploadRate();
+        return super.uploadRate();
     }
 
     public long getTotalDownload() {
-        if (session == null) {
-            return 0;
-        }
-        return session.getStats().download();
+        return super.totalDownload();
     }
 
     public long getTotalUpload() {
-        if (session == null) {
-            return 0;
-        }
-        return session.getStats().upload();
+        return super.totalUpload();
     }
 
     public int getDownloadRateLimit() {
-        if (session == null) {
-            return 0;
-        }
-        return session.getSettingsPack().downloadRateLimit();
+        return super.downloadSpeedLimit();
     }
 
     public int getUploadRateLimit() {
-        if (session == null) {
-            return 0;
-        }
-        return session.getSettingsPack().uploadRateLimit();
+        return super.uploadSpeedLimit();
     }
 
     public boolean isStarted() {
-        return session != null;
-    }
-
-    public boolean isPaused() {
-        return session != null && session.isPaused();
+        return isRunning();
     }
 
     public void start() {
+        if (isRunning()) {
+            return;
+        }
+
         sync.lock();
 
         try {
-            if (session != null) {
+            if (isRunning()) {
                 return;
             }
 
-            firewalled = true;
-            listenEndpoints.clear();
-            externalAddress = null;
+            settings_pack sp = new settings_pack();
+            sp.set_str(settings_pack.string_types.listen_interfaces.swigValue(), ctx.interfaces);
+            sp.set_int(settings_pack.int_types.max_retry_port_bind.swigValue(), ctx.retries);
 
-            session = new Session(ctx.interfaces, ctx.retries, false, innerListener);
-            downloader = new Downloader(session);
+            addListener(innerListener);
+
+            super.start(new SettingsPack(sp));
+
             loadSettings();
             fireStarted();
         } finally {
@@ -184,20 +152,21 @@ public final class BTEngine {
      * Abort and destroy the internal libtorrent session.
      */
     public void stop() {
+        if (!isRunning()) {
+            return;
+        }
+
         sync.lock();
 
         try {
-            if (session == null) {
+            if (!isRunning()) {
                 return;
             }
 
-            session.removeListener(innerListener);
+            removeListener(innerListener);
             saveSettings();
 
-            downloader = null;
-
-            session.abort();
-            session = null;
+            super.stop();
 
             fireStopped();
 
@@ -211,56 +180,25 @@ public final class BTEngine {
 
         try {
 
-            stop();
-            Thread.sleep(1000); // allow some time to release native resources
-            start();
+            super.restart();
 
-        } catch (InterruptedException e) {
-            // ignore
         } finally {
             sync.unlock();
         }
     }
 
-    public void pause() {
-        if (session != null && !session.isPaused()) {
-            session.pause();
-        }
-    }
-
-    public void resume() {
-        if (session != null) {
-            session.resume();
-        }
-    }
-
     public void updateSavePath(File dataDir) {
-        if (session == null) {
+        if (!isRunning()) {
             return;
         }
 
         ctx.dataDir = dataDir; // this will be removed when we start using platform
 
-        try {
-            torrent_handle_vector v = session.swig().get_torrents();
-            long size = v.size();
-
-            String path = dataDir.getAbsolutePath();
-            for (int i = 0; i < size; i++) {
-                torrent_handle th = v.get(i);
-                torrent_status ts = th.status();
-                boolean incomplete = !ts.getIs_seeding() && !ts.getIs_finished();
-                if (th.is_valid() && incomplete) {
-                    th.move_storage(path);
-                }
-            }
-        } catch (Throwable e) {
-            LOGGER.error("Error changing save path for session", e);
-        }
+        moveStorage(dataDir);
     }
 
     public void loadSettings() {
-        if (session == null) {
+        if (!isRunning()) {
             return;
         }
 
@@ -268,7 +206,7 @@ public final class BTEngine {
             File f = settingsFile();
             if (f.exists()) {
                 byte[] data = FileUtils.readFileToByteArray(f);
-                session.loadState(data);
+                loadState(data);
             } else {
                 revertToDefaultConfiguration();
             }
@@ -278,12 +216,12 @@ public final class BTEngine {
     }
 
     public void saveSettings() {
-        if (session == null) {
+        if (!isRunning()) {
             return;
         }
 
         try {
-            byte[] data = session.saveState();
+            byte[] data = saveState();
             FileUtils.writeByteArrayToFile(settingsFile(), data);
         } catch (Throwable e) {
             LOGGER.error("Error saving session state", e);
@@ -291,19 +229,19 @@ public final class BTEngine {
     }
 
     private void saveSettings(SettingsPack sp) {
-        if (session == null) {
+        if (!isRunning()) {
             return;
         }
-        session.applySettings(sp);
+        applySettings(sp);
         saveSettings();
     }
 
     public void revertToDefaultConfiguration() {
-        if (session == null) {
+        if (!isRunning()) {
             return;
         }
 
-        SettingsPack sp = session.getSettingsPack();
+        SettingsPack sp = settings();
 
         sp.broadcastLSD(true);
 
@@ -315,18 +253,17 @@ public final class BTEngine {
             sp.setCacheSize(256);
             sp.activeDownloads(4);
             sp.activeSeeds(4);
-            sp.setMaxPeerlistSize(200);
-            sp.setGuidedReadCache(true);
+            sp.maxPeerlistSize(200);
             sp.setTickInterval(1000);
             sp.setInactivityTimeout(60);
             sp.setSeedingOutgoingConnections(false);
-            sp.setConnectionsLimit(200);
+            sp.connectionsLimit(200);
         } else {
             sp.activeDownloads(10);
             sp.activeSeeds(10);
         }
 
-        session.applySettings(sp);
+        applySettings(sp);
         saveSettings();
     }
 
@@ -443,81 +380,6 @@ public final class BTEngine {
             File torrent = saveTorrent(ti);
             saveResumeTorrent(torrent);
         }
-    }
-
-    /**
-     * @param uri
-     * @param timeout in seconds
-     * @return
-     */
-    public byte[] fetchMagnet(String uri, int timeout) {
-        if (session == null) {
-            return null;
-        }
-
-        add_torrent_params p = add_torrent_params.create_instance_disabled_storage();
-        error_code ec = new error_code();
-        libtorrent.parse_magnet_uri(uri, p, ec);
-        p.setUrl(uri);
-
-        if (ec.value() != 0) {
-            throw new IllegalArgumentException(ec.message());
-        }
-
-        final sha1_hash info_hash = p.getInfo_hash();
-        String sha1 = info_hash.to_hex();
-
-        byte[] data = MAGNET_CACHE.get(sha1);
-        if (data != null) {
-            return data;
-        }
-
-        boolean add;
-        torrent_handle th;
-
-        synchronized (MAGNET_LOCK) {
-            th = session.swig().find_torrent(info_hash);
-            if (th != null && th.is_valid()) {
-                // we have a download with the same info-hash, let's wait
-                add = false;
-            } else {
-                add = true;
-            }
-
-            if (add) {
-                p.setName("fetch_magnet:" + uri);
-                p.setSave_path("fetch_magnet/" + uri);
-
-                long flags = p.get_flags();
-                flags &= ~add_torrent_params.flags_t.flag_auto_managed.swigValue();
-                p.set_flags(flags);
-
-                ec.clear();
-                th = session.swig().add_torrent(p, ec);
-                th.resume();
-            }
-        }
-
-        int n = 0;
-        do {
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                // ignore
-            }
-
-            data = MAGNET_CACHE.get(sha1);
-
-            n++;
-        } while (n < timeout && data == null);
-
-        synchronized (MAGNET_LOCK) {
-            if (add && th != null && th.is_valid()) {
-                session.swig().remove_torrent(th);
-            }
-        }
-
-        return data;
     }
 
     public void restoreDownloads() {
