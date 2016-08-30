@@ -21,10 +21,10 @@ package com.frostwire.bittorrent;
 import com.frostwire.jlibtorrent.*;
 import com.frostwire.jlibtorrent.alerts.*;
 import com.frostwire.jlibtorrent.swig.*;
-import com.frostwire.util.Logger;
 import com.frostwire.platform.FileSystem;
 import com.frostwire.platform.Platforms;
 import com.frostwire.search.torrent.TorrentCrawledSearchResult;
+import com.frostwire.util.Logger;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 
@@ -746,38 +746,6 @@ public final class BTEngine extends SessionManager {
         return s.replaceAll("[\\\\/:*?\"<>|\\[\\]]+", "_");
     }
 
-    // NOTE: don't delete, new API
-    /*
-    private static SettingsPack settingsToPack(SessionSettings s) {
-        string_entry_map map = new string_entry_map();
-        libtorrent.save_settings_to_dict(s.getSwig(), map);
-        entry e = new entry(map);
-        bdecode_node le = new bdecode_node();
-        error_code ec = new error_code();
-        bdecode_node.bdecode(e.bencode(), le, ec);
-        if (ec.value() != 0) {
-            throw new IllegalStateException("Can't create settings pack");
-        }
-
-        return new SettingsPack(libtorrent.load_pack_from_dict(le));
-    }*/
-
-    /*
-    private void updateAverageSpeeds() {
-        long now = System.currentTimeMillis();
-
-        bytesRecv = session.getStats().getPayloadDownload();
-        bytesSent = session.getStats().getPayloadUpload();
-
-        if (now - speedMarkTimestamp > SPEED_AVERAGE_CALCULATION_INTERVAL_MILLISECONDS) {
-            averageRecvSpeed = ((bytesRecv - totalRecvSinceLastSpeedStamp) * 1000) / (now - speedMarkTimestamp);
-            averageSentSpeed = ((bytesSent - totalSentSinceLastSpeedStamp) * 1000) / (now - speedMarkTimestamp);
-            speedMarkTimestamp = now;
-            totalRecvSinceLastSpeedStamp = bytesRecv;
-            totalSentSinceLastSpeedStamp = bytesSent;
-        }
-    }*/
-
     private final class InnerListener implements AlertListener {
         @Override
         public int[] types() {
@@ -823,39 +791,6 @@ public final class BTEngine extends SessionManager {
                     saveMagnetData((MetadataReceivedAlert) alert);
                     break;
             }
-        }
-    }
-
-    public Address externalAddress() {
-        return this.externalAddress;
-    }
-
-    public List<TcpEndpoint> listenEndpoints() {
-        return new LinkedList<>(listenEndpoints);
-    }
-
-    private void onExternalIpAlert(ExternalIpAlert alert) {
-        try {
-            // libtorrent perform all kind of tests
-            // to avoid non usable addresses
-            String address = alert.getExternalAddress().toString();
-            externalAddress = new Address(address);
-            LOGGER.info("External IP: " + externalAddress);
-        } catch (Throwable e) {
-            LOGGER.error("Error saving reported external ip", e);
-        }
-    }
-
-    private void saveMagnetData(MetadataReceivedAlert alert) {
-        try {
-            torrent_handle th = alert.handle().swig();
-            TorrentInfo ti = new TorrentInfo(th.get_torrent_copy());
-            String sha1 = ti.infoHash().toHex();
-            byte[] data = ti.bencode();
-
-            MAGNET_CACHE.put(sha1, data);
-        } catch (Throwable e) {
-            LOGGER.error("Error in saving magnet in internal cache", e);
         }
     }
 
@@ -996,6 +931,7 @@ public final class BTEngine extends SessionManager {
     }
 
     public void setListenInterfaces(String value) {
+        super.listenInterfaces(value);
         if (session == null) {
             return;
         }
@@ -1005,20 +941,6 @@ public final class BTEngine extends SessionManager {
     }
 
     public int getTotalDHTNodes() {
-        return totalDHTNodes;
-    }
-
-    private static final class LruCache<K, V> extends LinkedHashMap<K, V> {
-
-        private final int maxSize;
-
-        public LruCache(int maxSize) {
-            this.maxSize = maxSize;
-        }
-
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
-            return size() > maxSize;
-        }
+        return (int) dhtNodes();
     }
 }
